@@ -1,0 +1,137 @@
+"""End-to-end pipeline: wires together all five phases and produces the
+final scored customer table plus the diagnostic plots used in the README.
+"""
+
+import logging
+import os
+
+import matplotlib
+matplotlib.use("Agg")  # headless-safe backend for CI / Docker
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from src.config import FIGURES_DIR, RESULTS_DIR
+from src.data_generation import load_dataset
+from src.modeling import evaluate_auc, fit_logistic_model
+from src.scorecard import build_scorecard
+from src.statistical_tests import chi_square_test, ks_test
+from src.woe_iv import build_woe_dataset, select_features
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger(__name__)
+
+CANDIDATE_FEATURES = [
+    "age",
+    "mobile_recharge_freq_30d",
+    "utility_days_past_due",
+    "telecom_data_usage_gb",
+    "agri_yield_stability_index",
+    "wallet_transaction_count",
+]
+
+
+def run(save_outputs: bool = True) -> dict:
+    """Run all five phases in order and return the key artifacts.
+
+    Returns a dict with: df, iv_df, selected_features, woe_df, model_result,
+    auc, scorecard_df.
+    """
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(FIGURES_DIR, exist_ok=True)
+
+    # ---- Phase 1: data ----
+    df = load_dataset()
+    logger.info("Phase 1 | rows=%d default_rate=%.2f%%", len(df), 100 * df["loan_default"].mean())
+
+    # ---- Phase 2: statistical validation ----
+    df["utility_dpd_bin"] = pd.cut(
+        df["utility_days_past_due"], bins=[-1, 0, 5, 15, 1000], labels=["0", "1-5", "6-15", "15+"]
+    )
+    chi2, chi_p, dof = chi_square_test(df, "utility_dpd_bin")
+    ks_stat, ks_p = ks_test(df, "agri_yield_stability_index")
+    logger.info("Phase 2 | chi2=%.2f (p=%.2e, dof=%d)", chi2, chi_p, dof)
+    logger.info("Phase 2 | KS=%.4f (p=%.2e)", ks_stat, ks_p)
+
+    # ---- Phase 3: WoE / IV ----
+    iv_df, woe_tables, selected_features = select_features(df, CANDIDATE_FEATURES)
+    logger.info("Phase 3 | selected features (IV >= threshold): %s", selected_features)
+    woe_df = build_woe_dataset(df, selected_features, woe_tables)
+
+    # ---- Phase 4: logistic regression ----
+    feature_cols = [f"{f}_woe" for f in selected_features]
+    result, pred_prob = fit_logistic_model(woe_df, feature_cols)
+    auc = evaluate_auc(woe_df["loan_default"], pred_prob)
+    logger.info("Phase 4 | ROC-AUC=%.4f", auc)
+
+    # ---- Phase 5: scorecard ----
+    scorecard_df = build_scorecard(woe_df, pred_prob)
+    scorecard_df["loan_default"] = woe_df["loan_default"].values
+    logger.info(
+        "Phase 5 | score range %d-%d",
+        scorecard_df["Final_Credit_Score"].min(),
+        scorecard_df["Final_Credit_Score"].max(),
+    )
+
+    if save_outputs:
+        scorecard_df.to_csv(os.path.join(RESULTS_DIR, "scored_customers.csv"), index=False)
+        iv_df.to_csv(os.path.join(RESULTS_DIR, "iv_summary.csv"), index=False)
+        with open(os.path.join(RESULTS_DIR, "model_summary.txt"), "w") as f:
+            f.write(str(result.summary()))
+            f.write(f"\n\nROC-AUC: {auc:.4f}\n")
+        _save_figures(df, scorecard_df, pred_prob, woe_df["loan_default"])
+
+    return {
+        "df": df,
+        "iv_df": iv_df,
+        "selected_features": selected_features,
+        "woe_df": woe_df,
+        "model_result": result,
+        "auc": auc,
+        "scorecard_df": scorecard_df,
+    }
+
+
+def _save_figures(df, scorecard_df, pred_prob, y_true):
+    from sklearn.metrics import roc_curve
+
+    # Default rate by utility delinquency bucket
+    fig, ax = plt.subplots(figsize=(6, 4))
+    df.groupby("utility_dpd_bin", observed=True)["loan_default"].mean().plot(
+        kind="bar", ax=ax, color="#4C72B0"
+    )
+    ax.set_title("Default rate by utility delinquency bucket")
+    ax.set_ylabel("Default rate")
+    plt.tight_layout()
+    fig.savefig(os.path.join(FIGURES_DIR, "default_rate_by_dpd_bucket.png"), dpi=120)
+    plt.close(fig)
+
+    # ROC curve
+    fpr, tpr, _ = roc_curve(y_true, pred_prob)
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    ax.plot(fpr, tpr, color="#4C72B0", label="Model")
+    ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Random")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.set_title("ROC Curve: Probability of Default Model")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(os.path.join(FIGURES_DIR, "roc_curve.png"), dpi=120)
+    plt.close(fig)
+
+    # Score distribution by outcome
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    good = scorecard_df.loc[scorecard_df["loan_default"] == 0, "Final_Credit_Score"]
+    bad = scorecard_df.loc[scorecard_df["loan_default"] == 1, "Final_Credit_Score"]
+    ax.hist(good, bins=30, alpha=0.6, label="Good", density=True, color="#55A868")
+    ax.hist(bad, bins=30, alpha=0.6, label="Default", density=True, color="#C44E52")
+    ax.set_xlabel("Final Credit Score")
+    ax.set_ylabel("Density")
+    ax.set_title("Score Distribution by Actual Outcome")
+    ax.legend()
+    plt.tight_layout()
+    fig.savefig(os.path.join(FIGURES_DIR, "score_distribution.png"), dpi=120)
+    plt.close(fig)
+
+
+if __name__ == "__main__":
+    run()
