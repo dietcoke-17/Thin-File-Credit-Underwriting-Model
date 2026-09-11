@@ -3,8 +3,8 @@
 Dep. Variable:           loan_default   No. Observations:                10000
 Model:                          Logit   Df Residuals:                     9996
 Method:                           MLE   Df Model:                            3
-Date:                Thu, 10 Sep 2026   Pseudo R-squ.:                 0.06173
-Time:                        21:04:26   Log-Likelihood:                -4504.4
+Date:                Fri, 11 Sep 2026   Pseudo R-squ.:                 0.06173
+Time:                        09:28:12   Log-Likelihood:                -4504.4
 converged:                       True   LL-Null:                       -4800.8
 Covariance Type:            nonrobust   LLR p-value:                3.861e-128
 ==================================================================================================
@@ -17,3 +17,5 @@ mobile_recharge_freq_30d_woe      -1.1055      0.167     -6.628      0.000      
 ==================================================================================================
 
 ROC-AUC: 0.6664
+Gini coefficient: 0.3329
+KS-optimal cutoff: score >= 532.0 (approval rate 60.0%, bad rate among approved 12.55%, KS 0.2392)

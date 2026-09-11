@@ -1,4 +1,4 @@
-"""End-to-end pipeline: wires together all five phases and produces the
+"""End-to-end pipeline: wires together all six phases and produces the
 final scored customer table plus the diagnostic plots used in the README.
 """
 
@@ -12,9 +12,10 @@ import pandas as pd
 
 from src.config import FIGURES_DIR, RESULTS_DIR
 from src.data_generation import load_dataset
+from src.decisioning import build_cutoff_table, compute_gini, find_optimal_cutoff
 from src.modeling import evaluate_auc, fit_logistic_model
 from src.scorecard import build_scorecard
-from src.statistical_tests import chi_square_test, ks_test
+from src.statistical_tests import chi_square_test, ks_test, validate_features
 from src.woe_iv import build_woe_dataset, select_features
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -49,8 +50,16 @@ def run(save_outputs: bool = True) -> dict:
     )
     chi2, chi_p, dof = chi_square_test(df, "utility_dpd_bin")
     ks_stat, ks_p = ks_test(df, "agri_yield_stability_index")
-    logger.info("Phase 2 | chi2=%.2f (p=%.2e, dof=%d)", chi2, chi_p, dof)
-    logger.info("Phase 2 | KS=%.4f (p=%.2e)", ks_stat, ks_p)
+    logger.info("Phase 2 | example chi2=%.2f (p=%.2e, dof=%d)", chi2, chi_p, dof)
+    logger.info("Phase 2 | example KS=%.4f (p=%.2e)", ks_stat, ks_p)
+
+    feature_validation_df = validate_features(df, CANDIDATE_FEATURES)
+    n_significant = int(feature_validation_df["significant"].sum())
+    logger.info(
+        "Phase 2 | %d/%d candidate features significant on both Chi2 and KS (p<0.05)",
+        n_significant,
+        len(CANDIDATE_FEATURES),
+    )
 
     # ---- Phase 3: WoE / IV ----
     iv_df, woe_tables, selected_features = select_features(df, CANDIDATE_FEATURES)
@@ -72,26 +81,53 @@ def run(save_outputs: bool = True) -> dict:
         scorecard_df["Final_Credit_Score"].max(),
     )
 
+    # ---- Phase 6: risk decisioning (Gini + cutoff analysis) ----
+    gini = compute_gini(auc)
+    cutoff_table = build_cutoff_table(scorecard_df)
+    optimal_cutoff = find_optimal_cutoff(cutoff_table)
+    logger.info("Phase 6 | Gini=%.4f", gini)
+    logger.info(
+        "Phase 6 | KS-optimal cutoff: score>=%d | approval_rate=%.1f%% | bad_rate_approved=%.2f%%",
+        optimal_cutoff["cutoff_score"],
+        100 * optimal_cutoff["approval_rate"],
+        100 * optimal_cutoff["bad_rate_approved"],
+    )
+
     if save_outputs:
         scorecard_df.to_csv(os.path.join(RESULTS_DIR, "scored_customers.csv"), index=False)
         iv_df.to_csv(os.path.join(RESULTS_DIR, "iv_summary.csv"), index=False)
+        feature_validation_df.to_csv(
+            os.path.join(RESULTS_DIR, "feature_validation.csv"), index=False
+        )
+        cutoff_table.to_csv(os.path.join(RESULTS_DIR, "cutoff_analysis.csv"), index=False)
         with open(os.path.join(RESULTS_DIR, "model_summary.txt"), "w") as f:
             f.write(str(result.summary()))
             f.write(f"\n\nROC-AUC: {auc:.4f}\n")
-        _save_figures(df, scorecard_df, pred_prob, woe_df["loan_default"])
+            f.write(f"Gini coefficient: {gini:.4f}\n")
+            f.write(
+                f"KS-optimal cutoff: score >= {optimal_cutoff['cutoff_score']} "
+                f"(approval rate {optimal_cutoff['approval_rate']:.1%}, "
+                f"bad rate among approved {optimal_cutoff['bad_rate_approved']:.2%}, "
+                f"KS {optimal_cutoff['ks']:.4f})\n"
+            )
+        _save_figures(df, scorecard_df, pred_prob, woe_df["loan_default"], cutoff_table, optimal_cutoff)
 
     return {
         "df": df,
+        "feature_validation_df": feature_validation_df,
         "iv_df": iv_df,
         "selected_features": selected_features,
         "woe_df": woe_df,
         "model_result": result,
         "auc": auc,
+        "gini": gini,
         "scorecard_df": scorecard_df,
+        "cutoff_table": cutoff_table,
+        "optimal_cutoff": optimal_cutoff,
     }
 
 
-def _save_figures(df, scorecard_df, pred_prob, y_true):
+def _save_figures(df, scorecard_df, pred_prob, y_true, cutoff_table, optimal_cutoff):
     from sklearn.metrics import roc_curve
 
     # Default rate by utility delinquency bucket
@@ -130,6 +166,23 @@ def _save_figures(df, scorecard_df, pred_prob, y_true):
     ax.legend()
     plt.tight_layout()
     fig.savefig(os.path.join(FIGURES_DIR, "score_distribution.png"), dpi=120)
+    plt.close(fig)
+
+    # Gains / cutoff chart: cumulative Good% and Bad% captured across the
+    # score range, with the KS-optimal cutoff marked. This is the chart a
+    # credit risk team actually uses to pick an approve/decline line.
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    x = cutoff_table["approval_rate"] * 100
+    ax.plot(x, cutoff_table["cum_good_pct_captured"] * 100, color="#55A868", label="Cumulative Good % captured")
+    ax.plot(x, cutoff_table["cum_bad_pct_captured"] * 100, color="#C44E52", label="Cumulative Bad % captured")
+    ax.axvline(optimal_cutoff["approval_rate"] * 100, color="gray", linestyle="--",
+               label=f"KS-optimal cutoff (score \u2265 {int(optimal_cutoff['cutoff_score'])})")
+    ax.set_xlabel("Approval rate (% of population, best scores approved first)")
+    ax.set_ylabel("Cumulative % captured")
+    ax.set_title("Cutoff Analysis: Approval Rate vs Risk Capture")
+    ax.legend(fontsize=8)
+    plt.tight_layout()
+    fig.savefig(os.path.join(FIGURES_DIR, "cutoff_analysis.png"), dpi=120)
     plt.close(fig)
 
 

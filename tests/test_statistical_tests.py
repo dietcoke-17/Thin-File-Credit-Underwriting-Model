@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.statistical_tests import chi_square_test, ks_test
+from src.statistical_tests import chi_square_test, ks_test, validate_features
 
 
 def _toy_df():
@@ -39,3 +39,17 @@ def test_ks_test_near_zero_for_identical_distributions():
     )
     ks_stat, _ = ks_test(df, "continuous")
     assert ks_stat < 0.2
+
+
+def test_validate_features_covers_every_candidate():
+    df = _toy_df().rename(columns={"bucket": "cat_feature"})
+    df["extra_continuous"] = df["continuous"] + 5
+    result = validate_features(df, ["continuous", "extra_continuous"])
+    assert set(result["feature"]) == {"continuous", "extra_continuous"}
+    assert {"chi2", "chi2_p", "ks_stat", "ks_p", "significant"}.issubset(result.columns)
+
+
+def test_validate_features_flags_predictive_feature_as_significant():
+    df = _toy_df()
+    result = validate_features(df, ["continuous"])
+    assert bool(result.loc[0, "significant"]) is True
