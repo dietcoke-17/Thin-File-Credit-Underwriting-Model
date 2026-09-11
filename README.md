@@ -107,6 +107,26 @@ make test
 make run
 ```
 
+## Live scoring demo
+
+`app.py` is a small FastAPI service that scores one customer at a time instead of the batch of 10,000 the pipeline scores at once: it loads a bundle of the fitted WoE tables, logistic regression coefficients, PDO scaling constants, and KS-optimal cutoff (built by `train.py`), and exposes both a JSON API and a plain HTML form.
+
+```bash
+python train.py                              # fits the model, saves model/bundle.joblib
+uvicorn app:app --reload                      # http://127.0.0.1:8000
+```
+
+- `GET /` — a form for the three selected features (`mobile_recharge_freq_30d`, `utility_days_past_due`, `agri_yield_stability_index`) that returns a live score and Approve/Decline decision.
+- `POST /score` — same thing as JSON, e.g. `curl -X POST localhost:8000/score -H 'Content-Type: application/json' -d '{"mobile_recharge_freq_30d":4,"utility_days_past_due":5,"agri_yield_stability_index":0.75}'`.
+- `GET /health` — readiness check.
+
+`Dockerfile.api` builds a self-contained image (runs `train.py` at build time, so the bundle is baked in):
+
+```bash
+docker build -f Dockerfile.api -t thin-file-credit-scorecard-api .
+docker run --rm -p 8000:8000 thin-file-credit-scorecard-api
+```
+
 ## Deployment
 
 `.github/workflows/deploy-scoring.yml` runs the pipeline as a scheduled batch job: every Monday (and on manual dispatch), it builds the Docker image, pushes it to `ghcr.io/<repo>:latest`, runs the pipeline inside a container, and uploads `results/` and `reports/figures/` as a workflow artifact. Because `RANDOM_SEED` in `src/config.py` is fixed, repeat runs are reproducible rather than drifting, this is a template for a scheduled scoring job, swap in a real, changing data source to make it a genuine production batch run.
