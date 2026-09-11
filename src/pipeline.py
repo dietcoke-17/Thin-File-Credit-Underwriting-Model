@@ -117,6 +117,7 @@ def run(save_outputs: bool = True) -> dict:
         "feature_validation_df": feature_validation_df,
         "iv_df": iv_df,
         "selected_features": selected_features,
+        "woe_tables": woe_tables,
         "woe_df": woe_df,
         "model_result": result,
         "auc": auc,
