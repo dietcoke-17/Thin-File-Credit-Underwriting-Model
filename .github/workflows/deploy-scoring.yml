@@ -1,0 +1,51 @@
+name: Deploy scoring pipeline
+
+on:
+  schedule:
+    # 03:00 UTC every Monday
+    - cron: "0 3 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  build-and-run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.run_id }}
+
+      - name: Run scoring pipeline
+        run: |
+          mkdir -p results reports/figures
+          docker run --rm \
+            -v "${{ github.workspace }}/results:/app/results" \
+            -v "${{ github.workspace }}/reports:/app/reports" \
+            ghcr.io/${{ github.repository }}:${{ github.run_id }}
+
+      - name: Upload scoring outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: scoring-outputs-${{ github.run_id }}
+          path: |
+            results/
+            reports/figures/
+          retention-days: 90

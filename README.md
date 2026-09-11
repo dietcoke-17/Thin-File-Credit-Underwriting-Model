@@ -107,6 +107,12 @@ make test
 make run
 ```
 
+## Deployment
+
+`.github/workflows/deploy-scoring.yml` runs the pipeline as a scheduled batch job: every Monday (and on manual dispatch), it builds the Docker image, pushes it to `ghcr.io/<repo>:latest`, runs the pipeline inside a container, and uploads `results/` and `reports/figures/` as a workflow artifact. Because `RANDOM_SEED` in `src/config.py` is fixed, repeat runs are reproducible rather than drifting, this is a template for a scheduled scoring job, swap in a real, changing data source to make it a genuine production batch run.
+
+The pushed image (`ghcr.io/<repo>:<tag>`) can also be pulled and run anywhere a scheduled container fits: a VM cron job, an ECS Scheduled Task, or a Kubernetes CronJob, using the same `docker run` invocation as [With Docker](#with-docker) above.
+
 ## Testing
 
 Tests cover the statistical logic directly, not just that the pipeline runs without crashing: the PDO scaling formula is checked against its algebraic definition, the IV calculation is checked to rank a genuinely predictive synthetic feature above a genuinely random one, the Gini formula is checked against `2*AUC-1` at known points, and the cutoff table is checked for the monotonicity a real gains table should have (approval rate rising as more of the population is approved, bad rate never dropping as the cutoff loosens).
